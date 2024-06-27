@@ -12,6 +12,7 @@ library(sf)
 library(osmdata)
 library(ggmap)
 library(ggsn)
+library(cmdstanr)
 # 
 # ----- read.data -----
 # shapefiles (province)
@@ -152,6 +153,24 @@ object_Cambodia_kratie <-
     distance = sf::st_distance(centroid, inside_ways)
   )
 # 
+dataset <- 
+  list(
+    K = 2, 
+    y = object_Cambodia_kratie$area,
+    N = nrow(object_Cambodia_kratie
+             )
+    )
+# fit the model with stan
+model <- cmdstanr::cmdstan_model("latent_classification.stan")
+fit <- 
+  model$sample(
+    data = dataset,
+    seed = 123,
+    chains = 4,
+    parallel_chains = 4,
+    refresh = 1000
+    )
+
 # ----- draw.figure -----
 # Read the Google API key
 # NOTE
