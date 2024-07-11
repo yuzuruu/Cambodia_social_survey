@@ -73,10 +73,19 @@ kratie_bbox <-
   ) %>% 
   sf::st_transform(4326) %>% 
   sf::st_bbox()
-# 
+# set crs
+# for making quadrat
+# Using the crs, we can make the quadrat without overlapping.
 wgseqproj <- "EPSG:4087"
+# for general use
+# After making grids, use the crs below for convenient use.
 wgs84 <- "EPSG:4326"
+# read building footprints with addresses in Cambodia
+# NOTE
+# It consumes long reading times.
+# USE the completed data entitled "target_location.rds" instead.
 object_Cambodia_all <- readr::read_rds("object_Cambodia_all.rds")
+# make a subset focusing on Kratie province
 object_Cambodia_kratie <- 
   object_Cambodia_all %>% 
   dplyr::filter(province_name == "Krâchéh") %>% 
@@ -89,7 +98,7 @@ object_Cambodia_kratie <-
   dplyr::select(-geometry) %>% 
   st_as_sf() %>% 
   sf::st_transform(wgseqproj) 
-# shapefiles
+# Kratie
 kratie_map <- 
   sf::read_sf("./KHM_adm/gadm41_KHM_1.shp") %>% 
   dplyr::filter(NAME_1 == "Krâchéh")  %>% 
@@ -102,14 +111,14 @@ kratie_point <-
   sf::st_transform(wgseqproj) %>% 
   dplyr::tibble()
 # grid data settings
-# quadrat size
+# quadrat size in m (unit: metre)
 cellsize <- 
   data.frame(
     cellsize = c(100, 200, 500, 1000, 2000, 5000)
-    ) %>% 
+  ) %>% 
   dplyr::mutate(
     index = factor(order(cellsize))
-    ) %>% 
+  ) %>% 
   dplyr::tibble()
 # N. of sample
 n <- 100
@@ -123,19 +132,19 @@ target_location <-
   cellsize %>% 
   group_by(index) %>% 
   nest() %>% 
-  # make grid data
+  # make grids in accordance with provided size
   dplyr::mutate(
     grid = furrr::future_map(
       data,
       ~
-        st_make_grid(
+        sf::st_make_grid(
           kratie_map,
           cellsize = .$cellsize[1],
           square = TRUE,
           what = "polygons",
           crs = wgseqproj
         )  %>%
-        st_intersection(kratie_map) %>%
+        sf::st_intersection(kratie_map) %>%
         sf::st_as_sf() %>%
         sf::st_transform(4326) %>% 
         dplyr::mutate(
@@ -148,8 +157,8 @@ target_location <-
         ) %>% 
         dplyr::select(-centroid) ,
       .options = furrr_options(seed = 123)
-          )
-        ) %>% 
+    )
+  ) %>% 
   dplyr::mutate(
     obtain_location = furrr::future_map(
       grid,
@@ -162,8 +171,8 @@ target_location <-
         as.numeric() %>% 
         dplyr::tibble(location = .) ,
       .options = furrr_options(seed = 123)
-      )
-    ) %>% 
+    )
+  ) %>% 
   dplyr::mutate(
     obtain_location_complete = furrr::future_map(
       obtain_location,
@@ -182,22 +191,25 @@ target_location <-
           id_grid = factor(id_grid),
           area = as.numeric(area)),
       .options = furrr_options(seed = 123)
-      ) 
-    ) %>% 
+    ) 
+  ) %>% 
   dplyr::mutate(
     summary = furrr::future_map(
       obtain_location_complete,
       ~
-        tibble(.) %>% 
+        dplyr::tibble(.) %>% 
         dplyr::group_by(.$id_grid) %>% 
         dplyr::summarise(
           n_building = sum(!is.na(area)),
           mean_area_building  = mean(area, na.rm = TRUE),
           median_area_building  = median(area, na.rm = TRUE)
         ) %>%
+        # probability to be in a quadrat
+        # Vital value for spatial sampling
         dplyr::mutate(
           p = n_building/sum(n_building)
         ) %>% 
+        # replace NA into 0
         dplyr::mutate(
           across(contains("area"), \(x)replace_na(x,0))
         ) ,
@@ -208,28 +220,37 @@ target_location <-
 readr::write_rds(
   target_location, 
   "target_location.rds"
-  )
+)
 # 
 # ----- obtain.100.targets -----
 for(i in 1:5){
   target_location_100 <- 
     target_location %>% 
     dplyr::mutate(
+      # sample 100 quadrats in accordance with spatial distribution of the
+      # building footprints and bind the results with existing point data
       sample = furrr::future_map(
         summary,
         ~
-          dplyr::tibble(target_id = sample(nrow(.), size = n, replace = TRUE, prob = .$p)) %>% 
+          dplyr::tibble(
+            target_id = sample(
+              nrow(.), 
+              size = n, 
+              replace = TRUE, 
+              prob = .$p
+            )
+          ) %>% 
           dplyr::left_join(
             .,
             grid,
             by = c("target_id" = "id_grid"),
-          copy = TRUE
-        ) %>%
+            copy = TRUE
+          ) %>%
           sf::st_as_sf() %>%
           sf::st_centroid() %>% 
           sf::st_as_sf()
-        )
-      ) %>%
+      )
+    ) %>%
     dplyr::mutate(
       disance_duration = furrr::future_map(
         sample,
@@ -240,25 +261,25 @@ for(i in 1:5){
             loc = data.frame(lon = .$lon, lat = .$lat),
             # by car
             osrm.profile = "car"
-            ) %>% 
+          ) %>% 
           # pick the minimum moving distance and duration
           dplyr::tibble(
             distance = .[[1]]$summary$distance,
             duration = .[[1]]$summary$duration
-            ),
+          ),
         .options = furrr_options(seed = 123)
-        )
       )
+    )
   distance_duration <- 
     dplyr::bind_rows(target_location_100$disance_duration) %>%
     dplyr::select(2:3) %>%
     dplyr::mutate(
       index = rep(cellsize$index, times = 1)
-      )
+    )
   readr::write_excel_csv(
     distance_duration, 
     paste0("./distance_duration/distance_duation_",i,".csv")
-    )
+  )
 }
 
 # st_geometry(hoge$sample[[1]]) <- "geometry"
